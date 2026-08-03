@@ -12,6 +12,7 @@ use crate::executor::Il2CppExecutor;
 use crate::executor::custom_attribute_reader;
 use crate::config::Config;
 use crate::disassembler::{self, Disassembler, DisassemblyContext};
+use crate::pamap::PhysMap;
 
 pub struct Il2CppDecompiler;
 
@@ -22,6 +23,7 @@ impl Il2CppDecompiler {
         il2cpp: &Il2Cpp,
         config: &Config,
         output_dir: &str,
+        pamap: Option<&PhysMap>,
         mut logger: L,
     ) -> Result<()> {
         let output_path = Path::new(output_dir).join("dump.cs");
@@ -243,6 +245,7 @@ impl Il2CppDecompiler {
                     false,
                     flat_disasm,
                     if share_asm { Some(&mut method_asm_cache) } else { None },
+                    pamap,
                 ) {
                     writeln!(type_buf, "/*\n{e}\n*/\n}}").ok();
                 }
@@ -293,6 +296,7 @@ impl Il2CppDecompiler {
                             true,
                             split_disasm,
                             if share_asm { Some(&mut method_asm_cache) } else { None },
+                            pamap,
                         ) {
                             writeln!(split_buf, "/*\n{e}\n*/\n}}").ok();
                         }
@@ -347,6 +351,7 @@ impl Il2CppDecompiler {
         dump_nested: bool,
         disasm: &Option<(Disassembler, Vec<u64>)>,
         mut method_asm_cache: Option<&mut HashMap<u64, String>>,
+        pamap: Option<&PhysMap>,
     ) -> Result<()> {
         let type_def = metadata.type_defs[type_def_index].clone();
         let mut extends = Vec::new();
@@ -469,6 +474,7 @@ impl Il2CppDecompiler {
                 disasm,
                 type_def_index,
                 method_asm_cache.as_deref_mut(),
+                pamap,
             )?;
         }
 
@@ -490,6 +496,7 @@ impl Il2CppDecompiler {
                     true,
                     disasm,
                     method_asm_cache.as_deref_mut(),
+                    pamap,
                 ) {
                     writeln!(buf, "/* Error dumping nested type: {e} */").ok();
                 }
@@ -651,6 +658,7 @@ impl Il2CppDecompiler {
         disasm: &Option<(Disassembler, Vec<u64>)>,
         type_def_index: usize,
         mut method_asm_cache: Option<&mut HashMap<u64, String>>,
+        pamap: Option<&PhysMap>,
     ) -> Result<()> {
         writeln!(buf, "\n{indent}\t// Methods").ok();
         let method_end = type_def.method_start as usize + type_def.method_count as usize;
@@ -776,7 +784,11 @@ impl Il2CppDecompiler {
                 } else if method_pointer > 0 {
                     let rva = il2cpp.get_rva(method_pointer);
                     let offset = il2cpp.map_vatr(method_pointer).unwrap_or(rva);
-                    write!(buf, "{indent}\t// RVA: 0x{rva:X} Offset: 0x{offset:X} VA: 0x{method_pointer:X}").ok();
+                    if let Some(pa) = pamap.and_then(|p| p.pa_from_rva(rva)) {
+                        write!(buf, "{indent}\t// RVA: 0x{rva:X} Offset: 0x{offset:X} PA: 0x{pa:X} VA: 0x{method_pointer:X}").ok();
+                    } else {
+                        write!(buf, "{indent}\t// RVA: 0x{rva:X} Offset: 0x{offset:X} VA: 0x{method_pointer:X}").ok();
+                    }
                 } else {
                     write!(buf, "{indent}\t// RVA: -1 Offset: -1").ok();
                 }
@@ -895,6 +907,12 @@ impl Il2CppDecompiler {
                     if *ptr > 0 {
                         let rva = il2cpp.get_rva(*ptr);
                         let offset = il2cpp.map_vatr(*ptr).unwrap_or(rva);
+                        if let Some(pm) = pamap {
+                            if let Some(pa) = pm.pa_from_rva(rva) {
+                                writeln!(buf, "{indent}\t|-RVA: 0x{rva:X} Offset: 0x{offset:X} PA: 0x{pa:X} VA: 0x{ptr:X}").ok();
+                                continue;
+                            }
+                        }
                         writeln!(buf, "{indent}\t|-RVA: 0x{rva:X} Offset: 0x{offset:X} VA: 0x{ptr:X}").ok();
                     } else {
                         writeln!(buf, "{indent}\t|-RVA: 0x0 Offset: 0x0").ok();

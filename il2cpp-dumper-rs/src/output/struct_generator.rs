@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, BTreeMap};
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::Path;
+use serde_json::Value;
 use crate::error::Result;
 use crate::il2cpp::base::*;
 use crate::il2cpp::metadata::Metadata;
@@ -75,11 +76,12 @@ impl StructGenerator {
         il2cpp: &mut Il2Cpp,
         config: &crate::config::Config,
         output_dir: &str,
+        pamap: Option<&crate::pamap::PhysMap>,
         static_catalog: Option<&crate::output::static_field_exporter::StaticFieldCatalog>,
     ) -> Result<()> {
         let output_path = Path::new(output_dir);
 
-        let script_json = Self::build_script_json(executor, metadata, il2cpp, config, static_catalog)?;
+        let script_json = Self::build_script_json(executor, metadata, il2cpp, config, pamap, static_catalog)?;
         let string_literal_json = Self::build_string_literal_json(metadata)?;
         let header = Self::build_header(executor, metadata, il2cpp, config)?;
         let mut functions_header = String::new();
@@ -153,6 +155,7 @@ impl StructGenerator {
         metadata: &Metadata,
         il2cpp: &Il2Cpp,
         config: &crate::config::Config,
+        pamap: Option<&crate::pamap::PhysMap>,
         static_catalog: Option<&crate::output::static_field_exporter::StaticFieldCatalog>,
     ) -> Result<String> {
         use rayon::prelude::*;
@@ -368,7 +371,26 @@ impl StructGenerator {
         script.addresses = sorted_addresses;
 
         let json = script.to_json().map_err(|e| crate::error::Error::Other(e.to_string()))?;
+        let json = if let Some(pm) = pamap {
+            // Inject a "PA" field into every object that carries an "Address",
+            // computed from the live page map. Avoids touching every literal.
+            Self::inject_pa(json, pm)
+        } else {
+            json
+        };
         Ok(json)
+    }
+
+    /// Walk the serialized script.json and add "PA" (physical address) to every
+    /// object with an integer "Address", when the page is mapped.
+    fn inject_pa(json: String, pm: &crate::pamap::PhysMap) -> String {
+        use serde_json::Value;
+        let mut v: Value = match serde_json::from_str(&json) {
+            Ok(v) => v,
+            Err(_) => return json,
+        };
+        add_pa(&mut v, pm);
+        serde_json::to_string_pretty(&v).unwrap_or(json)
     }
 
     fn collect_all_addresses(
@@ -2322,4 +2344,31 @@ fn get_method_type_signature(types: &[Il2CppTypeEnum]) -> String {
         });
     }
     sig
+}
+
+/// Recursively inject a "PA" key into every JSON object that has an integer
+/// "Address", using the live physical-address map. Recurses into arrays/objects;
+/// leaves "Addresses" (a plain u64 array of RVAs) augmented by adding a parallel
+/// "PAs" array so the two stay aligned.
+fn add_pa(v: &mut Value, pm: &crate::pamap::PhysMap) {
+    match v {
+        Value::Object(map) => {
+            if let Some(Value::Number(addr)) = map.get("Address") {
+                if let Some(rva) = addr.as_u64() {
+                    if let Some(pa) = pm.pa_from_rva(rva) {
+                        map.insert("PA".to_string(), Value::Number((pa as u64).into()));
+                    }
+                }
+            }
+            for (_, val) in map.iter_mut() {
+                add_pa(val, pm);
+            }
+        }
+        Value::Array(arr) => {
+            for el in arr.iter_mut() {
+                add_pa(el, pm);
+            }
+        }
+        _ => {}
+    }
 }

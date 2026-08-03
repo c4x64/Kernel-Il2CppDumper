@@ -8,3 +8,4 @@ pub mod utils;
 pub mod executor;
 pub mod output;
 pub mod disassembler;
+pub mod pamap;

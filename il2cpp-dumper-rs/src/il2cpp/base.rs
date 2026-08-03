@@ -551,11 +551,8 @@ impl Il2Cpp {
         self.build_method_spec_lookup();
 
         if self.version >= 24.2 {
-
             self.load_code_gen_modules(&cr, map_vatr)?;
-
         }
-
 
         Ok(())
     }
@@ -594,7 +591,9 @@ impl Il2Cpp {
         }
 
         let modules_offset = map_vatr(cr.code_gen_modules)?;
+        eprintln!("[DBG] code_gen_modules ptr=0x{:x} offset=0x{:x} count={}", cr.code_gen_modules, modules_offset, cr.code_gen_modules_count);
         let module_ptrs = self.stream.read_ptr_array(modules_offset, cr.code_gen_modules_count as usize)?;
+        eprintln!("[DBG] read {} module ptrs", module_ptrs.len());
 
         for ptr in module_ptrs {
             let mod_offset = map_vatr(ptr)?;
@@ -631,10 +630,17 @@ impl Il2Cpp {
 
     pub fn get_method_pointer(&self, image_name: &str, method_def: &Il2CppMethodDefinition) -> u64 {
         if self.version >= 24.2 {
-            if let Some(ptrs) = self.code_gen_module_method_pointers.get(image_name) {
-                let method_pointer_index = (method_def.token & 0x00FFFFFF) as usize;
-                if method_pointer_index > 0 && method_pointer_index <= ptrs.len() {
-                    return ptrs[method_pointer_index - 1];
+            // The code-gen method-pointer table is keyed by the assembly name as
+            // it appears in Il2CppCodeGenModule.module_name (e.g. "Assembly-CSharp"),
+            // while callers pass the metadata ImageDef name (e.g. "Assembly-CSharp.dll").
+            // Try both forms so the lookup succeeds and dump.cs can resolve method RVAs.
+            let keys: [&str; 2] = [image_name, image_name.trim_end_matches(".dll")];
+            for key in keys {
+                if let Some(ptrs) = self.code_gen_module_method_pointers.get(key) {
+                    let method_pointer_index = (method_def.token & 0x00FFFFFF) as usize;
+                    if method_pointer_index > 0 && method_pointer_index <= ptrs.len() {
+                        return ptrs[method_pointer_index - 1];
+                    }
                 }
             }
             0

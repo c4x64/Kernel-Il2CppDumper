@@ -11,6 +11,7 @@ use il2cpp_dumper::config::Config;
 use il2cpp_dumper::error::Result;
 use il2cpp_dumper::il2cpp::metadata::{Metadata, MetadataVariant};
 use il2cpp_dumper::il2cpp::base::{Il2Cpp, VaSegment};
+use il2cpp_dumper::pamap::PhysMap;
 use il2cpp_dumper::executor::Il2CppExecutor;
 use il2cpp_dumper::output::decompiler::Il2CppDecompiler;
 use il2cpp_dumper::output::struct_generator::StructGenerator;
@@ -66,6 +67,16 @@ struct Cli {
     no_dump_static_metadata: bool,
     #[arg(long = "force-dump")]
     force_dump: bool,
+    /// Page map file (from lxgr_dump --pamap) mapping live VAs -> physical page
+    /// addresses. Combined with --il2cpp-base, the dumper annotates the dump
+    /// with physical addresses (PA = page_pa + (va & 0xFFF)) in dump.cs and
+    /// adds a "PA" field to the script.json entries.
+    #[arg(long = "pamap")]
+    pamap_flag: Option<String>,
+    /// In-process base VA of libil2cpp.so (ASLR load address). Required together
+    /// with --pamap to convert image-relative RVAs to physical addresses.
+    #[arg(long = "il2cpp-base")]
+    il2cpp_base_flag: Option<String>,
     #[arg(num_args = 0..=3)]
     positional: Vec<String>,
 }
@@ -1045,9 +1056,46 @@ fn run() -> Result<()> {
     let sp_dump = spinner("Generating dump.cs...");
     let mut executor = Il2CppExecutor::new(&metadata, &mut il2cpp)?;
 
-    Il2CppDecompiler::decompile(&mut executor, &mut metadata, &mut il2cpp, &config, &output_dir, |msg| {
+    // Optional physical-address map from a live capture (lxgr_dump --pamap).
+    let pamap: Option<PhysMap> = match (&cli.pamap_flag, &cli.il2cpp_base_flag) {
+        (Some(p), Some(b)) => {
+            let base = parse_hex_input(b);
+            if let (Some(base), Some(map)) = (Some(base), PhysMap::load(std::path::Path::new(p), base)) {
+                if base != 0 {
+                    print_info("il2cpp-base", &format!("{:#x}", base));
+                    print_success(&format!("loaded pagemap ({} pages)", map.len()));
+                    Some(map)
+                } else {
+                    println!(
+                        "{}",
+                        style("  ! --il2cpp-base is 0; physical-address annotations disabled").yellow()
+                    );
+                    None
+                }
+            } else {
+                println!(
+                    "{}",
+                    style("  ! could not load --pamap; physical-address annotations disabled").yellow()
+                );
+                None
+            }
+        }
+        (Some(_), None) => {
+            println!("{}", style("  ! --pamap needs --il2cpp-base too").yellow());
+            None
+        }
+        (None, Some(_)) => {
+            println!("{}", style("  ! --il2cpp-base needs --pamap too").yellow());
+            None
+        }
+        _ => None,
+    };
+
+    Il2CppDecompiler::decompile(&mut executor, &mut metadata, &mut il2cpp, &config, &output_dir, pamap.as_ref(), |msg| {
         sp_dump.set_message(msg.to_string());
     })?;
+    sp_dump.finish_and_clear();
+    print_success("dump.cs generated");
     sp_dump.finish_and_clear();
     print_success("dump.cs generated");
 
@@ -1077,6 +1125,7 @@ fn run() -> Result<()> {
         let sp = spinner("Generating structs...");
         StructGenerator::write_all(
             &mut executor, &mut metadata, &mut il2cpp, &config, &output_dir,
+            pamap.as_ref(),
             static_catalog.as_ref(),
         )?;
         il2cpp_dumper::output::embedded_scripts::write_scripts(std::path::Path::new(&output_dir))?;

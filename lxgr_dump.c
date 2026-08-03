@@ -181,8 +181,8 @@ uint64_t lxgr_resolve_chain(int pid, uint64_t base, const char *spec)
 long lxgr_dump_range(int pid, uint64_t va, uint64_t size, int out_fd,
                      uint64_t file_off)
 {
-    static const unsigned char zero[65536];
-    unsigned char *buf = malloc(65536);
+    static const unsigned char zero[65536] = {0};
+    unsigned char *buf = (unsigned char *)malloc(65536);
     if (!buf)
         return -1;
 

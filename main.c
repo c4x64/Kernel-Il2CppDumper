@@ -2,6 +2,7 @@
  * any project; lxgr_dump.c is the reusable library, this is the CLI). */
 
 #include "lxgr_dump.h"
+#include "lxgr_il2cpp.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -190,6 +191,58 @@ static void usage(void)
         "  --il2cpp  shorthand for --lib libil2cpp.so\n");
 }
 
+static uint64_t find_il2cpp_base(int pid)
+{
+    char mpath[64];
+    snprintf(mpath, sizeof(mpath), "/proc/%d/maps", pid);
+    FILE *mf = fopen(mpath, "r");
+    if (!mf)
+        return 0;
+    uint64_t base = 0;
+    char line[1024];
+    while (fgets(line, sizeof(line), mf)) {
+        if (strstr(line, "libil2cpp.so")) {
+            unsigned long long start, end, off;
+            char perms[8];
+            if (sscanf(line, "%llx-%llx %7s %llx", &start, &end, perms, &off) == 4 &&
+                off == 0) {
+                base = (uint64_t)start;
+                break;
+            }
+        }
+    }
+    fclose(mf);
+    return base;
+}
+
+static int resolve_name(int pid, const char *name, const char *index,
+                        int is_field)
+{
+    uint64_t base = find_il2cpp_base(pid);
+    if (!base) {
+        fprintf(stderr, "libil2cpp.so base not found\n");
+        return 1;
+    }
+    uint64_t addr = 0;
+    if (index) {
+        addr = is_field ? lxgr_il2cpp_field_file(index, base, name)
+                        : lxgr_il2cpp_method_file(index, base, name);
+    } else {
+        addr = is_field ? lxgr_il2cpp_field(base, name)
+                        : lxgr_il2cpp_method(base, name);
+    }
+    if (!addr) {
+        fprintf(stderr, "name not in index: %s\n", name);
+        return 1;
+    }
+    uint64_t pa = lxgr_va_to_pa(pid, addr);
+    printf("%s '%s' VA = 0x%llx (base 0x%llx + 0x%llx)  PA = 0x%llx\n",
+           is_field ? "field" : "method", name, (unsigned long long)addr,
+           (unsigned long long)base,
+           (unsigned long long)(addr - base), (unsigned long long)pa);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *pid_s = find_arg(argc, argv, "--pid");
@@ -286,6 +339,13 @@ int main(int argc, char **argv)
             return 1;
         return dump_range(pid, base, size, out, pamap);
     }
+
+    const char *ir = find_arg(argc, argv, "--il2cpp-resolve");
+    if (ir)
+        return resolve_name(pid, ir, find_arg(argc, argv, "--index"), 0);
+    const char *if_ = find_arg(argc, argv, "--il2cpp-field");
+    if (if_)
+        return resolve_name(pid, if_, find_arg(argc, argv, "--index"), 1);
 
     usage();
     return 1;

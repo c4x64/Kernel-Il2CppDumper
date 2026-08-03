@@ -1,0 +1,67 @@
+# lxgr-dump
+
+Standalone physical-address memory dumper for ARM64 Android (root). Dumps
+mapped regions of a running process, resolves pointer chains to absolute
+virtual addresses, and maps every dumped page to its **physical address** via
+`/proc/<pid>/pagemap` — a PA dump that standard tools (Il2CppDumper,
+GameGuardian, /proc/pid/mem dumpers) do not produce.
+
+Works standalone as a CLI, or as a tiny library linked into any other project
+(the LXGR overlay compiles `lxgr_dump.c` in as an extension).
+
+## Build
+
+Requires the Android NDK. From this directory:
+
+```sh
+ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk NDK_APPLICATION_MK=Application.mk
+# -> libs/arm64-v8a/lxgr_dump
+```
+
+## Usage
+
+All reads require root (`su`). Dumps are written as a raw binary plus a
+`<out>.pamap` physical map (`# VA PA` per page, `-` for non-present).
+
+```sh
+# Dump every readable segment of libil2cpp.so, reconstructed at file offsets:
+lxgr_dump --pid <pid> --lib libil2cpp.so --out /data/local/tmp/libil2cpp.so --pamap
+
+# Raw virtual range:
+lxgr_dump --pid <pid> --base 0x4102d0 --size 0x1000 --out /data/local/tmp/range.bin --pamap
+
+# Resolve a pointer chain to an absolute VA (+ print its PA):
+#   B = libil2cpp base, auto-discovered.  base+0x10 -> *(x) -> *(x+0x8) -> +0x20
+lxgr_dump --pid <pid> --chain "B+0x10>0x8>0x20"
+
+# Dump starting at a resolved chain target:
+lxgr_dump --pid <pid> --chain "B+0x10>0x8" --size 0x1000 --out /data/local/tmp/target.bin
+
+# Address conversion only:
+lxgr_dump --pid <pid> --v2p 0x4102d0
+lxgr_dump --pid <pid> --p2v 0x57fd012d0
+```
+
+## Library API
+
+`lxgr_dump.c` + `lxgr_dump.h` — no dependencies beyond libc. Link it into any
+codebase to get:
+
+```c
+uint64_t lxgr_va_to_pa(int pid, uint64_t va);            /* VA -> PA (pagemap) */
+uint64_t lxgr_pa_to_va(int pid, uint64_t pa);            /* PA -> VA (scan)     */
+uint64_t lxgr_resolve_chain(int pid, uint64_t base, const char *spec);
+long     lxgr_dump_range(int pid, uint64_t va, uint64_t size, int fd, uint64_t off);
+int      lxgr_pamap_range(int pid, uint64_t va, uint64_t size, FILE *pf);
+```
+
+`lxgr_read()` prefers `process_vm_readv` and falls back to `/proc/<pid>/mem`.
+
+## Notes
+
+- `PA` here is the physical page containing the data. `/dev/mem` is blocked on
+  most kernels (STRICT_DEVMEM), so true byte-for-byte physical reads require a
+  kernel-side primitive; the overlay's rwbridge module (independent) is the
+  optional backend for that.
+- Requires root: pagemap needs CAP_SYS_ADMIN; cross-process reads need
+  CAP_SYS_PTRACE.
